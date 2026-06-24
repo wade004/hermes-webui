@@ -2303,6 +2303,17 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
       }
       else if(typeof syncModelChip==='function') syncModelChip();
     }
+    // Fresh boot with no session and no saved model state: apply the
+    // profile/server default so the composer doesn't show the static HTML
+    // placeholder (e.g. GPT-5.4 Mini).
+    if(!sessionModelState&&!savedState&&window._defaultModel&&$('modelSelect')){
+      if(typeof _applyModelToDropdown==='function'){
+        _applyModelToDropdown(window._defaultModel,$('modelSelect'),window._activeProvider||null);
+      }else{
+        $('modelSelect').value=window._defaultModel;
+      }
+      if(typeof syncModelChip==='function') syncModelChip();
+    }
     if(S.session) syncTopbar();
   }).catch(e=>{
     window._modelDropdownReady=null;
@@ -2416,6 +2427,10 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
+  // Hydrate the model dropdown before marking boot ready so the composer
+  // chip shows the profile/server default instead of the static HTML
+  // placeholder (e.g. GPT-5.4 Mini).
+  await _startBootModelDropdown();
   S._bootReady=true;
   syncTopbar();
   // Restore panel pref so the workspace panel stays visible on a fresh load if the
