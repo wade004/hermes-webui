@@ -48,6 +48,127 @@ function parseCommand(text){
   return {name,args};
 }
 
+const DESKTOP_COMPANION_EXTENSION_ID='desktop-companion';
+const DESKTOP_COMPANION_NAME='Desktop Companion';
+const DESKTOP_COMPANION_INSTALL_PATH='Settings -> Extensions -> Gallery -> Desktop Companion';
+const DESKTOP_COMPANION_SETUP_GUIDE_URL='https://github.com/franksong2702/hermes-webui-desktop-companion#after-gallery-install';
+const DESKTOP_COMPANION_LOCAL_APP_LABEL='Desktop Companion app';
+
+function _getDesktopCompanionStatusGlobal(){
+  if(typeof window==='undefined') return null;
+  return window.__HERMES_WEBUI_DESKTOP_COMPANION_STATUS__||null;
+}
+
+function _getDesktopCompanionExtensionStatus(status){
+  return Array.isArray(status&&status.extensions)
+    ? status.extensions.find(ext=>String(ext&&ext.id||'')===DESKTOP_COMPANION_EXTENSION_ID)||null
+    : null;
+}
+
+function _petSlashCommandArgs(rawCommandText){
+  const parsed=parseCommand(String(rawCommandText||'').trim());
+  return parsed&&parsed.name==='pet' ? parsed.args : String(rawCommandText||'').trim().replace(/^\/pet\b\s*/i,'').trim();
+}
+
+function _desktopCompanionMissingMessage(){
+  return `${DESKTOP_COMPANION_NAME} is not installed yet.
+
+Install it from ${DESKTOP_COMPANION_INSTALL_PATH}, then follow the setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}.
+
+The guide also shows how to start the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}.`;
+}
+
+function _desktopCompanionDisabledMessage(){
+  return `${DESKTOP_COMPANION_NAME} is installed but disabled.
+
+Enable it in Settings -> Extensions, then reload WebUI if you just changed that and start the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}.
+
+Setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}`;
+}
+
+function _desktopCompanionReloadMessage(){
+  return `${DESKTOP_COMPANION_NAME} is enabled, but the adapter status is not loaded yet.
+
+Reload WebUI if you just enabled it, then start the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}.`;
+}
+
+function _desktopCompanionConnectMessage(){
+  return `${DESKTOP_COMPANION_NAME} is enabled, but the local app is not connected yet.
+
+Start or connect the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}, then retry /pet.
+
+Setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}`;
+}
+
+function _desktopCompanionStatusUnavailableMessage(){
+  return `${DESKTOP_COMPANION_NAME} status is unavailable right now.
+
+Reload WebUI or check your connection, then retry /pet.`;
+}
+
+function _desktopCompanionUnavailableMessage(){
+  return `${DESKTOP_COMPANION_NAME} is installed and connected, but /pet is not available yet in this Desktop Companion version.
+
+Update the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}, then follow the setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}.`;
+}
+
+function _desktopCompanionHookErrorMessage(){
+  return `${DESKTOP_COMPANION_NAME} is installed and connected, but it hit an error while handling /pet.
+
+Check the browser console and the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}, then retry /pet.`;
+}
+
+async function handlePetSlashCommand(rawCommandText,meta){
+  const command=String(rawCommandText||'');
+  const commandName=String((meta&&meta.name)||'pet').trim()||'pet';
+  const args=_petSlashCommandArgs(command);
+  let status;
+  try{
+    status=await api('/api/extensions/status');
+  }catch(_e){
+    return {handled:false,message:_desktopCompanionStatusUnavailableMessage()};
+  }
+  const companion=_getDesktopCompanionExtensionStatus(status);
+  if(!companion){
+    return {handled:false,message:_desktopCompanionMissingMessage()};
+  }
+  if(companion.effective_enabled!==true){
+    return {handled:false,message:_desktopCompanionDisabledMessage()};
+  }
+  const companionStatus=_getDesktopCompanionStatusGlobal();
+  if(!companionStatus){
+    return {handled:false,message:_desktopCompanionReloadMessage()};
+  }
+  if(companionStatus.connected!==true){
+    return {handled:false,message:_desktopCompanionConnectMessage()};
+  }
+  const hook=typeof window!=='undefined'&&window.__hermesHandlePetSlashCommand;
+  if(typeof hook==='function'){
+    try{
+      const result=await hook({
+        command,
+        args,
+        source:'webui-slash-command',
+        metadata:{name:commandName},
+      });
+      if(result){
+        return {
+          handled:true,
+          message:result&&typeof result==='object'&&'message' in result
+            ? String(result.message??'')
+            : '',
+        };
+      }
+    }catch(_e){
+      if(typeof console!=='undefined'&&console.error){
+        console.error('[hermes] Desktop Companion /pet hook error:',_e);
+      }
+      return {handled:false,message:_desktopCompanionHookErrorMessage()};
+    }
+  }
+  return {handled:false,message:_desktopCompanionUnavailableMessage()};
+}
+
 function executeCommand(text){
   const parsed=parseCommand(text);
   if(!parsed)return null;
@@ -76,11 +197,22 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
+  if('pet'.startsWith(q)&&!seen.has('pet')){
+    const petMeta=Array.isArray(_agentCommandCache)
+      ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
+      : null;
+    matches.push({
+      name:'pet',
+      desc:String((petMeta&&petMeta.description)||'Desktop Companion command').trim()||'Desktop Companion command',
+      source:'agent',
+    });
+    seen.add('pet');
+  }
   // Include agent/plugin commands from /api/commands metadata
   for(const cmd of (_agentCommandCache||[])){
     const name=String(cmd&&cmd.name||'').toLowerCase();
     if(!name.startsWith(q)||seen.has(name))continue;
-    if(cmd.cli_only)continue;
+    if(cmd.cli_only&&name!=='pet')continue;
     matches.push({
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
@@ -1079,7 +1211,7 @@ async function cmdPersonality(args){
 async function cmdStop(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
-  if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
+  if(typeof cancelStream==='function'){await cancelStream('slash-stop');showToast(t('stream_stopped'));}
   else showToast(t('cancel_unavailable'));
 }
 
@@ -1185,7 +1317,7 @@ async function cmdInterrupt(args){
   updateQueueBadge(S.session.session_id);
   S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
-  if(typeof cancelStream==='function'){await cancelStream();}
+  if(typeof cancelStream==='function'){await cancelStream('slash-interrupt');}
   showToast(t('cmd_interrupt_confirm'),2000);
 }
 
@@ -1216,20 +1348,12 @@ async function cmdSteer(args){
   await _trySteer(msg, /*explicitSteer=*/true);
 }
 
-/**
- * Shared implementation for /steer and the busy_input_mode='steer' path.
- *
- * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
- * the active stream running. Steer belongs to the active run; a failed Steer
- * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
- *
- * @param {string} msg - The steer text.
- * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Affects toast wording and draft restore.
- * @returns {Promise<boolean>} true when the steer was delivered, false when the
- *   draft was restored and the active stream was left untouched.
- */
+function _steerFailureMessageKey(fallback) {
+  const key = 'steer_fail_' + (fallback || 'unknown');
+  return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
+    ? key : 'steer_fail_unknown';
+}
+
 function _showSteerIndicator(text){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
@@ -1250,6 +1374,49 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
+function _showSteerRecovery(msg, explicitSteer, fallback) {
+  const inner = document.getElementById('msgInner');
+  if (!inner) return;
+  const old = inner.querySelector('.steer-recovery');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'steer-recovery';
+  const label = document.createElement('span');
+  label.className = 'steer-recovery-label';
+  label.textContent = t(_steerFailureMessageKey(fallback));
+  el.appendChild(label);
+  const retryBtn = document.createElement('button');
+  retryBtn.className = 'steer-recovery-retry';
+  retryBtn.textContent = t('steer_recovery_retry');
+  retryBtn.addEventListener('click', () => {
+    el.remove();
+    void _trySteer(msg, explicitSteer).catch(console.error);
+  });
+  el.appendChild(retryBtn);
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'steer-recovery-dismiss';
+  dismissBtn.textContent = t('steer_recovery_dismiss');
+  dismissBtn.addEventListener('click', () => el.remove());
+  el.appendChild(dismissBtn);
+  inner.appendChild(el);
+  if (typeof scrollToBottom === 'function') scrollToBottom();
+}
+
+/**
+ * Shared implementation for /steer and the busy_input_mode='steer' path.
+ *
+ * Tries the real steer endpoint first. On any non-accept response (no cached
+ * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
+ * the active stream running. Steer belongs to the active run; a failed Steer
+ * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
+ *
+ * @param {string} msg - The steer text.
+ * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
+ *   (vs the busy-mode auto-fallback). Affects draft restore prefix only;
+ *   toast wording is determined by the failure reason code.
+ * @returns {Promise<boolean>} true when the steer was delivered, false when the
+ *   draft was restored and the active stream was left untouched.
+ */
 async function _trySteer(msg, explicitSteer){
   let result=null;
   try{
@@ -1279,11 +1446,9 @@ async function _trySteer(msg, explicitSteer){
     if(typeof autoResize==='function')autoResize();
   }
   if(typeof renderTray==='function')renderTray();
-  if(explicitSteer){
-    showToast(t('cmd_steer_fallback'),3500);
-  } else {
-    showToast(t('busy_steer_fallback'),3500);
-  }
+  const fallbackCode = result && result.fallback;
+  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
+  _showSteerRecovery(msg, explicitSteer, fallbackCode);
   return false;
 }
 
@@ -1479,7 +1644,15 @@ function cmdReasoning(args){
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');
-  if(mic&&mic.style.display!=='none'&&!mic.disabled){try{mic.click();return;}catch(_){}}
+  const micVisible=!!(
+    mic
+    && mic.style.display!=='none'
+    && !mic.disabled
+    && !mic.classList.contains('composer-control-hidden')
+    && mic.getAttribute('aria-hidden')!=='true'
+    && (!window.getComputedStyle||window.getComputedStyle(mic).display!=='none')
+  );
+  if(micVisible){try{mic.click();return;}catch(_){}}
   showToast(t('cmd_voice_use_mic'));
 }
 

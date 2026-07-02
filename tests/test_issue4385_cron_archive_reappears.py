@@ -109,16 +109,22 @@ def test_cron_state_projection_preserves_archived_sidecar(monkeypatch, tmp_path)
             (sid, "Cron Session", "test-model", 1, 20, "cron", "cron"),
         )
 
-    class ArchivedSidecar:
-        title = "Cron Session"
-        archived = True
-
-    monkeypatch.setattr(
-        models.Session,
-        "load_metadata_only",
-        staticmethod(lambda candidate: ArchivedSidecar() if candidate == sid else None),
+    # Write a real archived sidecar JSON under a patched SESSION_DIR so the
+    # projection's sidecar read exercises the production path (the #4842 perf
+    # fix stat-gates on SESSION_DIR/{sid}.json before consulting metadata, so a
+    # mock of load_metadata_only without a real file would never be reached —
+    # which mirrors production, where archived metadata only exists when the
+    # file does).
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / f"{sid}.json").write_text(
+        '{"session_id": "%s", "title": "Cron Session", "created_at": 1.0,'
+        ' "updated_at": 2.0, "archived": true, "messages": []}' % sid,
+        encoding="utf-8",
     )
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "ensure_cron_project", lambda: "cron-project")
+    models.clear_sidecar_metadata_cache()
 
     rows = models._load_cli_sessions_uncached(
         tmp_path,
@@ -195,15 +201,17 @@ def test_webhook_state_projection_preserves_archived_sidecar(monkeypatch, tmp_pa
             (sid,),
         )
 
-    class ArchivedWebhookSidecar:
-        title = "Webhook Session"
-        archived = True
-
-    monkeypatch.setattr(
-        models.Session,
-        "load_metadata_only",
-        staticmethod(lambda candidate: ArchivedWebhookSidecar() if candidate == sid else None),
+    # Real archived sidecar JSON under a patched SESSION_DIR (see the cron test
+    # above — the #4842 stat-gate requires the file to exist, matching prod).
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / f"{sid}.json").write_text(
+        '{"session_id": "%s", "title": "Webhook Session", "created_at": 1.0,'
+        ' "updated_at": 2.0, "archived": true, "messages": []}' % sid,
+        encoding="utf-8",
     )
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.clear_sidecar_metadata_cache()
 
     rows = models._load_cli_sessions_uncached(
         tmp_path,
@@ -218,8 +226,9 @@ def test_webhook_state_projection_preserves_archived_sidecar(monkeypatch, tmp_pa
     assert row["title"] == "Webhook Session"
     assert row["source_tag"] == "webhook"
     assert row["raw_source"] == "webhook"
-    assert row["session_source"] == "other"
+    assert row["session_source"] == "webhook"
     assert row["source_label"] == "Webhook"
+    assert row["project_id"]
     assert row["is_cli_session"] is False
     assert row["archived"] is True
 
@@ -240,8 +249,9 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
         "archived": True,
         "source_tag": "webhook",
         "raw_source": "webhook",
-        "session_source": "other",
+        "session_source": "webhook",
         "source_label": "Webhook",
+        "project_id": "webhook-project",
         "is_cli_session": False,
     }
 
@@ -274,6 +284,7 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
     assert len(matching) == 1
     assert matching[0]["archived"] is True
     assert matching[0]["source_tag"] == "webhook"
+    assert matching[0]["default_hidden"] is True
     assert matching[0]["is_cli_session"] is False
 
 
